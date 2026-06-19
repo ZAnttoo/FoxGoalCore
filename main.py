@@ -17,7 +17,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # -----------------------------
-# RSS FEEDS (FIX: più bilanciati)
+# RSS FEEDS
 # -----------------------------
 
 RSS_FEEDS = [
@@ -29,7 +29,7 @@ RSS_FEEDS = [
 ]
 
 # -----------------------------
-# SAFE DOMAIN
+# DOMAIN
 # -----------------------------
 
 def get_domain(url):
@@ -37,8 +37,7 @@ def get_domain(url):
         if not url:
             return "unknown"
         parsed = urlparse(url)
-        domain = parsed.netloc
-        return domain.replace("www.", "") if domain else "unknown"
+        return parsed.netloc.replace("www.", "")
     except:
         return "unknown"
 
@@ -50,33 +49,51 @@ def source_score(d):
     return SOURCE_SCORES.get(d, SOURCE_SCORES["default"])
 
 # -----------------------------
-# STRICT FRESHNESS FILTER (FIX 2024)
+# FRESHNESS FILTER (NO 2024)
 # -----------------------------
 
 def is_recent(e, hours=72):
     try:
         if not hasattr(e, "published_parsed") or not e.published_parsed:
-            return False  # blocca news senza data
+            return False
 
         pub = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
 
-        age = now - pub
-        return 0 <= age.total_seconds() <= hours * 3600
-
+        return 0 <= (now - pub).total_seconds() <= hours * 3600
     except:
         return False
 
 # -----------------------------
-# PLAYER EXTRACTION
+# 🔥 SOLO CALCIOMERCATO FILTER
+# -----------------------------
+
+def is_transfer_related(text):
+    keywords = [
+        "calciomercato", "mercato", "trasferimento",
+        "cede", "ceduto", "prestito", "acquisto",
+        "offerta", "trattativa", "firma", "contratto",
+        "scambio", "accordo", "ingaggio"
+    ]
+
+    t = text.lower()
+    return any(k in t for k in keywords)
+
+# -----------------------------
+# ENTITY EXTRACTION (solo se mercato)
 # -----------------------------
 
 def extract_entities(text):
+
+    if not is_transfer_related(text):
+        return []
+
     words = re.findall(r"[A-Z][a-z]{2,}", text)
 
     blacklist = {
         "Calcio", "Serie", "Champions", "League",
-        "Breaking", "Ufficiale", "Mercato", "Live", "News"
+        "Breaking", "Live", "News",
+        "Partita", "Gol", "Risultato", "Infortunio"
     }
 
     return list({w for w in words if w not in blacklist})
@@ -163,7 +180,6 @@ def run():
 
             domain = get_domain(link)
 
-            # FIX: anti dominanza Gazzetta
             clusters[key]["sources"].add(domain)
             clusters[key]["links"].append(link)
 
@@ -175,11 +191,7 @@ def run():
 
         score = sum(source_score(s) for s in sources) / len(sources)
 
-        # FIX anti bias
-        if sources.count("gazzetta.it") > 2:
-            score -= 10
-
-        msg = f"""🦊 FOXGOAL V16
+        msg = f"""🦊 FOXGOAL V17 (TRANSFER MODE)
 
 {label(score, len(sources))} → {" & ".join(v["entities"])}
 
