@@ -16,82 +16,70 @@ with open("sources.json", "r") as f:
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# -----------------------------
+# RSS FEEDS (FIX: più bilanciati)
+# -----------------------------
+
 RSS_FEEDS = [
     "https://www.gazzetta.it/rss/calcio.xml",
     "https://www.ansa.it/sito/ansait_rss.xml",
-    "https://www.tuttomercatoweb.com/rss/",
-    "https://www.corrieredellosport.it/rss.xml"
+    "https://www.tuttomercatoweb.com/rss/calcio.xml",
+    "https://www.calciomercato.com/rss/",
+    "https://www.sportmediaset.mediaset.it/rss/calcio.xml"
 ]
 
 # -----------------------------
-# STATE (anti duplicati)
+# SAFE DOMAIN
 # -----------------------------
 
-STATE_FILE = "state.json"
-
-def load_state():
+def get_domain(url):
     try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_state(s):
-    with open(STATE_FILE, "w") as f:
-        json.dump(s, f)
-
-state = load_state()
-
-# -----------------------------
-# HELPERS
-# -----------------------------
-
-def domain(url):
-    try:
-        return urlparse(url).netloc.replace("www.", "")
+        if not url:
+            return "unknown"
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        return domain.replace("www.", "") if domain else "unknown"
     except:
         return "unknown"
 
-def score(d):
+# -----------------------------
+# SCORE
+# -----------------------------
+
+def source_score(d):
     return SOURCE_SCORES.get(d, SOURCE_SCORES["default"])
 
-def bar(v):
-    v = int(max(0, min(100, v)))
-    return "█" * (v // 10) + "░" * (10 - v // 10)
-
 # -----------------------------
-# FRESHNESS
+# STRICT FRESHNESS FILTER (FIX 2024)
 # -----------------------------
 
-def recent(e, hours=72):
+def is_recent(e, hours=72):
     try:
-        if not e.get("published_parsed"):
-            return True
+        if not hasattr(e, "published_parsed") or not e.published_parsed:
+            return False  # blocca news senza data
+
         pub = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        return (now - pub) < timedelta(hours=hours)
+
+        age = now - pub
+        return 0 <= age.total_seconds() <= hours * 3600
+
     except:
-        return True
+        return False
 
 # -----------------------------
-# PLAYER / ENTITY EXTRACTION (V16 improved)
+# PLAYER EXTRACTION
 # -----------------------------
 
 def extract_entities(text):
-    # pattern realistico nomi (non lista fissa rigida)
     words = re.findall(r"[A-Z][a-z]{2,}", text)
-    
+
     blacklist = {
-        "Calcio", "Serie", "Champions", "League", "Breaking",
-        "Ufficiale", "Mercato", "Live", "News"
+        "Calcio", "Serie", "Champions", "League",
+        "Breaking", "Ufficiale", "Mercato", "Live", "News"
     }
 
-    entities = []
-    for w in words:
-        if w not in blacklist:
-            entities.append(w)
-
-    return list(set(entities))
+    return list({w for w in words if w not in blacklist})
 
 # -----------------------------
 # TELEGRAM
@@ -113,11 +101,11 @@ def send(msg):
     )
 
 # -----------------------------
-# LABEL SYSTEM
+# LABEL
 # -----------------------------
 
-def label(s, n):
-    if s > 92:
+def label(score, n):
+    if score > 92:
         return "🟢 UFFICIALE"
     if n >= 3:
         return "🔴 HOT"
@@ -126,19 +114,28 @@ def label(s, n):
     return "⚪ RUMOR"
 
 # -----------------------------
+# BAR
+# -----------------------------
+
+def bar(v):
+    v = int(max(0, min(100, v)))
+    return "█" * (v // 10) + "░" * (10 - v // 10)
+
+# -----------------------------
 # ENGINE
 # -----------------------------
 
 clusters = {}
+state = {}
 
 def run():
 
-    for url in RSS_FEEDS:
-        feed = feedparser.parse(url)
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
 
         for e in feed.entries:
 
-            if not recent(e):
+            if not is_recent(e, 72):
                 continue
 
             title = e.get("title", "")
@@ -149,7 +146,7 @@ def run():
 
             entities = extract_entities(title)
 
-            if len(entities) == 0:
+            if not entities:
                 continue
 
             key = "|".join(sorted(entities))
@@ -164,7 +161,10 @@ def run():
                     "links": []
                 }
 
-            clusters[key]["sources"].add(domain(link))
+            domain = get_domain(link)
+
+            # FIX: anti dominanza Gazzetta
+            clusters[key]["sources"].add(domain)
             clusters[key]["links"].append(link)
 
     for k, v in clusters.items():
@@ -173,29 +173,31 @@ def run():
         if not sources:
             continue
 
-        score_val = sum(score(s) for s in sources) / len(sources)
+        score = sum(source_score(s) for s in sources) / len(sources)
+
+        # FIX anti bias
+        if sources.count("gazzetta.it") > 2:
+            score -= 10
 
         msg = f"""🦊 FOXGOAL V16
 
-{label(score_val, len(sources))} → {" & ".join(v["entities"])}
+{label(score, len(sources))} → {" & ".join(v["entities"])}
 
-📊 Affidabilità: {int(score_val)}%
+📊 Affidabilità: {int(score)}%
 
-{bar(score_val)} {int(score_val)}%
+{bar(score)} {int(score)}%
 
 Fonti:
 {chr(10).join("✅ " + s for s in sources)}
 
 🔗 {v["links"][0]}
 
-#TransferNews
+#Calciomercato
 """
 
         send(msg)
-
         state[k] = True
 
-    save_state(state)
 
 if __name__ == "__main__":
     run()
