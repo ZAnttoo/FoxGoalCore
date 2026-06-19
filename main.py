@@ -13,12 +13,8 @@ from datetime import datetime, timezone, timedelta
 with open("sources.json", "r") as f:
     SOURCE_SCORES = json.load(f)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-# -----------------------------
-# RSS FEEDS
-# -----------------------------
 
 RSS_FEEDS = [
     "https://www.gazzetta.it/rss/calcio.xml",
@@ -28,118 +24,106 @@ RSS_FEEDS = [
 ]
 
 # -----------------------------
-# SAFE DOMAIN
+# STATE (anti duplicati)
 # -----------------------------
 
-def get_domain(url):
+STATE_FILE = "state.json"
+
+def load_state():
     try:
-        if not url:
-            return "unknown"
-        parsed = urlparse(url)
-        domain = parsed.netloc
-        return domain.replace("www.", "") if domain else "unknown"
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_state(s):
+    with open(STATE_FILE, "w") as f:
+        json.dump(s, f)
+
+state = load_state()
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+
+def domain(url):
+    try:
+        return urlparse(url).netloc.replace("www.", "")
     except:
         return "unknown"
 
+def score(d):
+    return SOURCE_SCORES.get(d, SOURCE_SCORES["default"])
+
+def bar(v):
+    v = int(max(0, min(100, v)))
+    return "█" * (v // 10) + "░" * (10 - v // 10)
+
 # -----------------------------
-# SOURCE SCORE
+# FRESHNESS
 # -----------------------------
 
-def source_score(domain):
-    return SOURCE_SCORES.get(domain, SOURCE_SCORES["default"])
-
-# -----------------------------
-# FRESHNESS FILTER
-# -----------------------------
-
-def is_recent(entry, hours=72):
+def recent(e, hours=72):
     try:
-        if not hasattr(entry, "published_parsed") or not entry.published_parsed:
+        if not e.get("published_parsed"):
             return True
-
-        published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        pub = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-
-        return (now - published) <= timedelta(hours=hours)
+        return (now - pub) < timedelta(hours=hours)
     except:
         return True
 
 # -----------------------------
-# PLAYER DETECTION
+# PLAYER / ENTITY EXTRACTION (V16 improved)
 # -----------------------------
 
-def extract_players(text):
-    players = [
-        "Osimhen", "Ndoye", "Lukaku", "Vlahovic", "Leao",
-        "Chiesa", "Dybala", "Kvara", "Kvaratskhelia",
-        "Barella", "Tonali", "Modric", "Haaland"
-    ]
+def extract_entities(text):
+    # pattern realistico nomi (non lista fissa rigida)
+    words = re.findall(r"[A-Z][a-z]{2,}", text)
+    
+    blacklist = {
+        "Calcio", "Serie", "Champions", "League", "Breaking",
+        "Ufficiale", "Mercato", "Live", "News"
+    }
 
-    found = []
-    for p in players:
-        if re.search(rf"\b{p.lower()}\b", text.lower()):
-            found.append(p)
+    entities = []
+    for w in words:
+        if w not in blacklist:
+            entities.append(w)
 
-    return found
+    return list(set(entities))
 
 # -----------------------------
 # TELEGRAM
 # -----------------------------
 
-def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Missing Telegram credentials")
+def send(msg):
+    if not TOKEN or not CHAT_ID:
+        print("Missing Telegram config")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    })
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={
+            "chat_id": CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+    )
 
 # -----------------------------
-# LABEL
+# LABEL SYSTEM
 # -----------------------------
 
-def label(score, sources_count):
-    if score >= 95:
+def label(s, n):
+    if s > 92:
         return "🟢 UFFICIALE"
-    if sources_count >= 3:
+    if n >= 3:
         return "🔴 HOT"
-    if sources_count == 2:
+    if n == 2:
         return "🟡 TRATTATIVA"
     return "⚪ RUMOR"
-
-# -----------------------------
-# BAR
-# -----------------------------
-
-def bar(score):
-    score = int(max(0, min(100, score)))
-    return "█" * (score // 10) + "░" * (10 - score // 10)
-
-# -----------------------------
-# FORMAT
-# -----------------------------
-
-def format_msg(players, score, sources, link):
-    return f"""🦊 FOXGOAL V11
-
-{label(score, len(sources))} → {" & ".join(players)}
-
-📊 Affidabilità: {score:.0f}%
-
-{bar(score)} {score:.0f}%
-
-Fonti:
-{chr(10).join([f"✅ {s}" for s in sources])}
-
-🔗 {link}
-
-#Calciomercato
-"""
 
 # -----------------------------
 # ENGINE
@@ -149,12 +133,12 @@ clusters = {}
 
 def run():
 
-    for feed_url in RSS_FEEDS:
-        feed = feedparser.parse(feed_url)
+    for url in RSS_FEEDS:
+        feed = feedparser.parse(url)
 
         for e in feed.entries:
 
-            if not is_recent(e, hours=72):
+            if not recent(e):
                 continue
 
             title = e.get("title", "")
@@ -163,38 +147,55 @@ def run():
             if not title or not link:
                 continue
 
-            players = extract_players(title)
+            entities = extract_entities(title)
 
-            if not players:
+            if len(entities) == 0:
                 continue
 
-            key = "|".join(players)
+            key = "|".join(sorted(entities))
+
+            if state.get(key):
+                continue
 
             if key not in clusters:
                 clusters[key] = {
-                    "players": players,
+                    "entities": entities,
                     "sources": set(),
                     "links": []
                 }
 
-            domain = get_domain(link)
-
-            clusters[key]["sources"].add(domain)
+            clusters[key]["sources"].add(domain(link))
             clusters[key]["links"].append(link)
 
-    for key, data in clusters.items():
+    for k, v in clusters.items():
 
-        sources = list(data["sources"])
-        score = sum([source_score(s) for s in sources]) / len(sources)
+        sources = list(v["sources"])
+        if not sources:
+            continue
 
-        msg = format_msg(
-            data["players"],
-            score,
-            sources,
-            data["links"][0]
-        )
+        score_val = sum(score(s) for s in sources) / len(sources)
 
-        send_telegram(msg)
+        msg = f"""🦊 FOXGOAL V16
+
+{label(score_val, len(sources))} → {" & ".join(v["entities"])}
+
+📊 Affidabilità: {int(score_val)}%
+
+{bar(score_val)} {int(score_val)}%
+
+Fonti:
+{chr(10).join("✅ " + s for s in sources)}
+
+🔗 {v["links"][0]}
+
+#TransferNews
+"""
+
+        send(msg)
+
+        state[k] = True
+
+    save_state(state)
 
 if __name__ == "__main__":
     run()
